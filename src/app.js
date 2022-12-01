@@ -1,4 +1,4 @@
-import express, { response } from "express";
+import express, { request, response } from "express";
 import users from "./database";
 import { v4 as uuidv4 } from "uuid";
 import { hash, compare } from "bcryptjs";
@@ -8,9 +8,9 @@ import "dotenv/config";
 const app = express();
 app.use(express.json());
 
-const port = 3000;
+const port = 3001;
 
-//MIDDLEWARES - são funções que ficam entre o cliente e o controller e podem fazer uma lógica ou verificação que estava repetitiva nos services
+//MIDDLEWARES
 const ensureAuthMiddleware = (request, response, next) => {
   let authorization = request.headers.authorization;
 
@@ -20,9 +20,9 @@ const ensureAuthMiddleware = (request, response, next) => {
     });
   }
 
-  authorization = authorization.split(" ")[1];
+  const token = authorization.split(" ")[1];
 
-  return jwt.verify(authorization, process.env.SECRET_KEY, (error, decoded) => {
+  return jwt.verify(token, process.env.SECRET_KEY, (error, decoded) => {
     if (error) {
       return response.status(401).json({
         message: "Invalid token",
@@ -32,14 +32,17 @@ const ensureAuthMiddleware = (request, response, next) => {
     request.user = {
       id: decoded.sub,
       age: decoded.age,
+      isAdm: decoded.isAdm,
     };
 
-    return next(request.user);
+    // request.user = decoded;
+
+    return next();
   });
 };
 
 const ensureUserExistsMiddleware = (request, response, next) => {
-  const userIndex = users((el) => el.uuid === request.params.id);
+  const userIndex = users.findIndex((el) => el.uuid === request.user.id);
 
   if (userIndex === -1) {
     return response.status(404).json({
@@ -47,33 +50,27 @@ const ensureUserExistsMiddleware = (request, response, next) => {
     });
   }
 
-  request.user = {
-    userIndex: userIndex,
-  };
+  request.user = userIndex;
 
   return next();
 };
 
-const ensureIsAdminMiddleware = (request, response, next) => {
+const ensureIsAdmMiddleware = (request, response, next) => {
   const user = users.find((el) => el.uuid === request.user.id);
-  // console.log("User: ", user);
-  // console.log("Request: ", request.user);
-  if (user.isAdmin === false) {
+  if (user.isAdm === false) {
     return response.status(403).json({
       message: "missing admin permissions",
     });
   }
-  return next(request.user);
+  return next();
 };
 
-//SERVICES - lógica e manipulação dos dados
+//SERVICES
 const createUserService = async (userData) => {
   const sameEmail = users.find((el) => el.email === userData.email);
 
   if (sameEmail) {
-    return response.status(409).json({
-      message: "Email already registered",
-    });
+    return [409, { message: "Email already registered" }];
   }
 
   const user = {
@@ -92,21 +89,18 @@ const loginUserService = async ({ email, password }) => {
   const user = users.find((el) => el.email === email);
 
   if (!user) {
-    return response.status(401).json({
-      message: "Wrong email/password",
-    });
+    return [401, { message: "Wrong email/password" }];
   }
 
   const passwordMatch = await compare(password, user.password);
   if (!passwordMatch) {
-    return response(401).json({
-      message: "Wrong email/password",
-    });
+    return [401, { message: "Wrong email/password" }];
   }
 
   const token = jwt.sign(
     {
       age: user.age,
+      isAdm: user.isAdm,
     },
     process.env.SECRET_KEY,
     {
@@ -123,45 +117,68 @@ const listUsersService = () => {
 };
 
 const listUserProfileService = (index) => {
-  const user = {
+  const userIndex = {
     ...users[index],
-    // decode token
   };
+
+  const { password, ...user } = userIndex;
+
   return [200, user];
 };
 
-const updateUserService = (id) => {
+const updateUserService = async (userToken, payload, id) => {
   const user = users.find((el) => el.uuid === id);
-
   const userIndex = users.findIndex((el) => el.uuid === id);
 
-  if (user || users[userIndex].isAdmin) {
-    const updatedUser = {
+  const payloadKeys = Object.keys(payload);
+
+  if (payloadKeys.includes("isAdm")) {
+    return [401, { message: "Can´t update isAdmin" }];
+  }
+
+  if (payload.password) {
+    payload.password = await hash(payload.password, 10);
+  }
+
+  if (userToken.id === id || userToken.isAdm === true) {
+    const newUser = {
       ...user,
+      ...payload,
       updatedOn: new Date(),
     };
-    return [200, updatedUser];
+    console.log(users);
+
+    const { password, ...updatedUser } = newUser;
+
+    return [201, updatedUser];
   }
-  return response.status(403).json({
-    message: "missing admin permissions",
-  });
+  return [403, { message: "missing admin permissions" }];
 };
 
-const deleteUserService = (id) => {
-  const user = users.find((el) => el.uuid === id);
+const deleteUserService = (id_logado_token, id_params) => {
+  const userToBeDeleted_Index = users.findIndex((el) => el.uuid === id_params);
 
-  const userIndex = users.findIndex((el) => el.uuid === id);
-
-  if (user || users[userIndex].isAdmin) {
-    users.splice(userIndex, 1);
-    return [200, {}];
+  if (id_params === id_logado_token) {
+    if (userToBeDeleted_Index !== -1) {
+      users.splice(userToBeDeleted_Index, 1);
+      return [204, {}];
+    }
   }
-  return response.status(403).json({
-    message: "missing admin permissions",
-  });
+
+  const verifYUserLoggedIsAdmin = users.find(
+    (el) => el.uuid === id_logado_token
+  );
+
+  if (verifYUserLoggedIsAdmin.isAdm === true) {
+    if (userToBeDeleted_Index !== -1) {
+      users.splice(userToBeDeleted_Index, 1);
+      return [204, {}];
+    }
+  }
+  return [403, { message: "missing admin permissions" }];
 };
 
-//CONTROLLERS - recebem os dados da requisição do cliente, e retornam uma resposta p/ o cliente
+//CONTROLLERS
 const createUserController = async (request, response) => {
   const [status, data] = await createUserService(request.body);
   return response.status(status).json(data);
@@ -173,24 +190,28 @@ const loginUserController = async (request, response) => {
 };
 
 const listUsersController = (request, response) => {
-  const [status, data] = listUsersService(request);
+  const [status, data] = listUsersService();
   return response.status(status).json(data);
 };
 
 const listUserProfileController = (request, response) => {
-  const [status, data] = listUserProfileService(userIndex);
+  const [status, data] = listUserProfileService(request.user);
   return response.status(status).json(data);
 };
 
-const updateUserController = (request, response) => {
+const updateUserController = async (request, response) => {
   const id = request.params.id;
-  const [status, data] = updateUserService(id);
+  const [status, data] = await updateUserService(
+    request.user,
+    request.body,
+    id
+  );
   return response.status(status).json(data);
 };
 
 const deleteUserController = (request, response) => {
   const id = request.params.id;
-  const [status, data] = deleteUserService(id);
+  const [status, data] = deleteUserService(request.user.id, id);
   return response.status(status).json(data);
 };
 
@@ -200,7 +221,7 @@ app.post("/login", loginUserController);
 app.get(
   "/users",
   ensureAuthMiddleware,
-  ensureIsAdminMiddleware,
+  ensureIsAdmMiddleware,
   listUsersController
 );
 app.get(
@@ -209,18 +230,8 @@ app.get(
   ensureUserExistsMiddleware,
   listUserProfileController
 );
-app.patch(
-  "/users/:id",
-  ensureAuthMiddleware,
-  ensureUserExistsMiddleware,
-  updateUserController
-);
-app.delete(
-  "/users/:id",
-  ensureAuthMiddleware,
-  ensureUserExistsMiddleware,
-  deleteUserController
-);
+app.patch("/users/:id", ensureAuthMiddleware, updateUserController);
+app.delete("/users/:id", ensureAuthMiddleware, deleteUserController);
 
 app.listen(port, () => {
   console.log(`Running server in port ${port}`);
