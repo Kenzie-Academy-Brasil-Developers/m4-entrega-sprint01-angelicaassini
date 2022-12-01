@@ -1,4 +1,4 @@
-import express, { request, response } from "express";
+import express from "express";
 import users from "./database";
 import { v4 as uuidv4 } from "uuid";
 import { hash, compare } from "bcryptjs";
@@ -146,7 +146,6 @@ const updateUserService = async (userToken, payload, id) => {
       ...payload,
       updatedOn: new Date(),
     };
-    console.log(users);
 
     const { password, ...updatedUser } = newUser;
 
